@@ -71,10 +71,18 @@ class PixelModel(Model):
     super().__init__(seed, args)
     shape = (1, self.env.args['nely'], self.env.args['nelx'])
     z_init = np.broadcast_to(args['volfrac'] * args['mask'], shape)
-    self.z = tf.Variable(z_init, trainable=True)
+    # register z as a Keras weight and use float64 to match physics/L-BFGS
+    self.z = self.add_weight(
+        name="z",
+        shape=shape,
+        initializer=tf.constant_initializer(z_init),
+        trainable=True,
+        dtype=tf.float64,
+    )
 
   def call(self, inputs=None):
     return self.z
+
 
 
 def global_normalization(inputs, epsilon=1e-6):

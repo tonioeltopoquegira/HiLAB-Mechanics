@@ -55,7 +55,7 @@ def train_tf_optimizer(
   frames = []
   for i in range(max_iterations + 1):
     with tf.GradientTape() as t:
-      t.watch(tvars)
+      #t.watch(tvars)
       logits = model(None)
       loss = model.loss(logits)
 
@@ -110,9 +110,14 @@ def train_lbfgs(
   def value_and_grad(x):
     _set_variables(tvars, x)
     with tf.GradientTape() as t:
-      t.watch(tvars)
       logits = model(None)
-      loss = model.loss(logits)
+      loss_fn = getattr(model, "loss", None)
+      if callable(loss_fn):
+        loss = loss_fn(logits)
+      else:
+        # fallback to the class method (should rarely be needed)
+        loss = type(model).loss(model, logits)
+
     grads = t.gradient(loss, tvars)
     frames.append(logits.numpy().copy())
     losses.append(loss.numpy().copy())
@@ -144,6 +149,8 @@ def method_of_moving_asymptotes(
 
   if not isinstance(model, models.PixelModel):
     raise ValueError('MMA only defined for pixel models')
+
+  model(None)
 
   env = model.env
   if init_model is None:

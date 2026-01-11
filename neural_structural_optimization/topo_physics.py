@@ -49,23 +49,31 @@ def default_args():
   forces = np.zeros(2*(nely+1)*(nelx+1))
   forces[1] = -1.0
 
-  return {'young': 1,     # material properties
-          'young_min': 1e-9,
-          'poisson': 0.3,
-          'g': 0,  # force of gravity
-          'volfrac': 0.4,  # constraints
-          'nelx': nelx,     # input parameters
-          'nely': nely,
-          'freedofs': freedofs,
-          'fixdofs': fixdofs,
-          'forces': forces,
-          'mask': 1,
-          'penal': 3.0,
-          'rmin': 1.5,
-          'opt_steps': 50,
-          'filter_width': 2,
-          'step_size': 0.5,
-          'name': 'truss'}
+  return {
+      'young': 1,     # material properties
+      'young_min': 1e-9,
+      'poisson': 0.3,
+      'g': 0,  # force of gravity
+      'volfrac': 0.4,  # constraints
+      'nelx': nelx,     # input parameters
+      'nely': nely,
+      'freedofs': freedofs,
+      'fixdofs': fixdofs,
+      'forces': forces,
+      'mask': 1,
+      # SIMP penalization (default 3.0). The following optional keys
+      # control an annealing schedule: penal is set each optimization step
+      # from penal_start -> penal_end following t**penal_power (t in [0,1]).
+      'penal': 3.0,
+      'penal_start': 3.0,
+      'penal_end': 3.0,
+      'penal_power': 1.0,
+      'rmin': 1.5,
+      'opt_steps': 50,
+      'filter_width': 2,
+      'step_size': 0.5,
+      'name': 'truss'
+  }
 
 
 def physical_density(x, args, volume_contraint=False, cone_filter=True):
@@ -291,6 +299,17 @@ def run_toposim(x=None, args=None, loss_only=True, verbose=True):
 
   losses = []
   for step in range(args['opt_steps']):
+    # compute annealed penal value (linear/power schedule between start/end)
+    penal_start = float(args.get('penal_start', args.get('penal', 3.0)))
+    penal_end = float(args.get('penal_end', args.get('penal', penal_start)))
+    penal_power = float(args.get('penal_power', 1.0))
+    if args['opt_steps'] > 1:
+      t = float(step) / float(args['opt_steps'] - 1)
+    else:
+      t = 1.0
+    # schedule follows t**penal_power; when power==1.0 this is linear
+    args['penal'] = float(penal_start + (penal_end - penal_start) * (t ** penal_power))
+
     c, x = optimality_criteria_step(x, ke, args)
     losses.append(c)
 

@@ -1,0 +1,31 @@
+conda activate topopt39
+
+# remove problematic native libs
+pip uninstall -y pyarrow pandas
+conda remove -y pyarrow pandas
+
+# install clean conda-forge builds
+conda install -y -c conda-forge pyarrow pandas
+
+
+
+test:
+
+python - << 'EOF'
+import pyarrow
+print("pyarrow OK", pyarrow.__version__)
+import pandas
+print("pandas OK", pandas.__version__)
+EOF
+
+
+then if broken:
+conda activate topopt39
+
+# remove problematic native libs
+pip uninstall -y pyarrow pandas
+conda remove -y pyarrow pandas
+
+# install clean conda-forge builds
+conda install -y -c conda-forge pyarrow pandas
+
