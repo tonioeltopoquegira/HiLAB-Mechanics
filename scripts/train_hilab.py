@@ -424,7 +424,7 @@ def sweep_thaw_depths_with_loaders(
             try:
                 torch.save(model.state_dict(), full_path)
                 # Also save decoder-only weights for quick loading in downstream BO
-                decoder_path = os.path.join("models", f"vitvae_decoder_thaw{k}.pt")
+                decoder_path = os.path.join("models", f"vitvae_decoder_thaw{k}_latent{latent_dim}.pt")
                 dec_state = {kname: v for kname, v in model.state_dict().items() if kname.startswith("decoder") or kname.startswith("decoder_input")}
                 # include metadata
                 meta = {"latent_dim": latent_dim, "recon_size": (128, 256)}
@@ -557,12 +557,12 @@ if __name__ == "__main__":
         normalize_from_uint8=CONFIG['normalize_from_uint8'],
     )
 
-    thaw_settings = [2]  # 2 = your current choice
+    thaw_settings = [2]  # 2 = my best choice
     results, curves = sweep_thaw_depths_with_loaders(
         train_loader, val_loader,
         thaw_depths=thaw_settings,
-        epochs_per_setting=20,
-        latent_dim=16,
+        epochs_per_setting=15,
+        latent_dim=8, # 16 my best choice
         recon_type="bce",
         kl_weight=1e-2,
         lr=1e-4,

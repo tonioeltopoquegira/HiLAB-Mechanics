@@ -1,2 +1,6 @@
 outputs
 *.pyc
+bo_results
+models
+figures
+examples
