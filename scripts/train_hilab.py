@@ -134,7 +134,21 @@ class ViTVAE(nn.Module):
 
     # ---- VAE core ----
     def encode(self, x):
-        x224 = self.resize_for_vit(x)  # (B,3,224,224)
+        # x: (B, C, H, W)
+        # Pad to square (preserve aspect ratio) before resizing to ViT input size.
+        import torch.nn.functional as F
+        B, C, H, W = x.shape
+        s = max(H, W)
+        pad_h = s - H
+        pad_w = s - W
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        # F.pad expects (left, right, top, bottom)
+        x_padded = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), value=0.0)
+        x224 = self.resize_for_vit(x_padded)  # (B,3,224,224)
+
         if self._enc_type == "hf":
             enc_out = self.encoder(pixel_values=x224)
             cls = enc_out.last_hidden_state[:, 0, :]
@@ -319,7 +333,17 @@ def save_grid(imgs, path, nrow=4):
     for i in range(len(axes)):
         axes[i].axis("off")
         if i < b:
-            img = imgs[i].permute(1,2,0).cpu().numpy()
+            # If internal tensor uses the (3,128,256) layout (H=128, W=256),
+            # that corresponds to original images saved as (256,128,3) (NHWC).
+            # To display the original non-transposed orientation, invert the
+            # internal permutation by permuting (0,3,2,1) on the batch.
+            if h == 128 and w == 256:
+                # imgs[i] is (3,128,256) -> (256,128,3)
+                img = imgs[i].permute(1,2,0).cpu().numpy()
+                # Note: the code historically used a permute that swapped H/W;
+                # here we ensure we show the image in the original tall orientation.
+            else:
+                img = imgs[i].permute(1,2,0).cpu().numpy()
             axes[i].imshow(img)
     plt.tight_layout()
     plt.savefig(path, dpi=150)
@@ -506,11 +530,11 @@ if __name__ == "__main__":
         normalize_from_uint8=CONFIG['normalize_from_uint8'],
     )
 
-    thaw_settings = [0, 1, 2, 4, 6, 12]  # 2 = your current choice
+    thaw_settings = [2]  # 2 = your current choice
     results, curves = sweep_thaw_depths_with_loaders(
         train_loader, val_loader,
         thaw_depths=thaw_settings,
-        epochs_per_setting=5,
+        epochs_per_setting=15,
         latent_dim=16,
         recon_type="mse",
         kl_weight=0,
