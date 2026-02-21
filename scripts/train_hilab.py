@@ -11,6 +11,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import torch.optim as optim
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import datetime
 try:
     from transformers import ViTModel
     _USE_HF = True
@@ -28,7 +29,7 @@ from torch.utils.data import TensorDataset, DataLoader
 # =========================
 #  Utilities
 # =========================
-def set_seed(seed: int = 42):
+def set_seed(seed: int = 0):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -51,9 +52,10 @@ def count_trainable_params(model):
 class ViTVAE(nn.Module):
     """
     ViT encoder (CLS token -> latent) + lightweight ConvTranspose decoder to (3, 128, 256).
-    Supports either HuggingFace `transformers` ViTModel or a `timm` ViT fallback.
+    Decoder channels have been reduced by one power-of-two compared to the original:
+    seed channels 512 -> 256, then 256->128->64->32->16->3.
     """
-    def __init__(self, latent_dim=16, vit_name='google/vit-base-patch16-224-in21k'):
+    def __init__(self, latent_dim=16, vit_name='google/vit-base-patch16-224-in21k', size_decoder: str = "small"):
         super().__init__()
         self.resize_for_vit = nn.Upsample(size=(224, 224), mode='bilinear', align_corners=False)
 
@@ -78,20 +80,63 @@ class ViTVAE(nn.Module):
         self.fc_mu = nn.Linear(self.encoder_hidden_size, latent_dim)
         self.fc_logvar = nn.Linear(self.encoder_hidden_size, latent_dim)
 
-        self.decoder_input = nn.Linear(latent_dim, 512 * 4 * 8)   # seed (512, 4, 8)
-        self.decoder = nn.Sequential(
-            nn.Unflatten(dim=1, unflattened_size=(512, 4, 8)),                 # (512, 4, 8)
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),  # (256, 8, 16)
-            nn.BatchNorm2d(256), nn.ReLU(True),
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (128, 16, 32)
-            nn.BatchNorm2d(128), nn.ReLU(True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # (64, 32, 64)
-            nn.BatchNorm2d(64), nn.ReLU(True),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),    # (32, 64, 128)
-            nn.BatchNorm2d(32), nn.ReLU(True),
-            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1),     # (3, 128, 256)
-            nn.Sigmoid()
-        )
+        # ======= CHANGED: one power-of-two smaller in channels =======
+        # original: decoder_input = latent -> 512 * 4 * 8 (seed 512, 4x8)
+        # new: seed channels 512 -> 256
+        if size_decoder == "small":
+            self.decoder_input = nn.Linear(latent_dim, 256 * 4 * 8)   # seed (256, 4, 8)
+            self.decoder = nn.Sequential(
+                nn.Unflatten(dim=1, unflattened_size=(256, 4, 8)),                 # (256, 4, 8)
+                nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (128, 8, 16)
+                nn.BatchNorm2d(128), nn.ReLU(True),
+                nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # (64, 16, 32)
+                nn.BatchNorm2d(64), nn.ReLU(True),
+                nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),    # (32, 32, 64)
+                nn.BatchNorm2d(32), nn.ReLU(True),
+                nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),    # (16, 64, 128)
+                nn.BatchNorm2d(16), nn.ReLU(True),
+                nn.ConvTranspose2d(16, 3, kernel_size=4, stride=2, padding=1),     # (3, 128, 256)
+                nn.Sigmoid()
+            )
+
+        if size_decoder == "medium":
+            self.decoder_input = nn.Linear(latent_dim, 512 * 4 * 8)   # seed (512, 4, 8)
+            self.decoder = nn.Sequential(
+                nn.Unflatten(dim=1, unflattened_size=(512, 4, 8)),                 # (512, 4, 8)
+                nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),  # (256, 8, 16)
+                nn.BatchNorm2d(256), nn.ReLU(True),
+                nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (128, 16, 32)
+                nn.BatchNorm2d(128), nn.ReLU(True),
+                nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # (64, 32, 64)
+                nn.BatchNorm2d(64), nn.ReLU(True),
+                nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),    # (32, 64, 128)
+                nn.BatchNorm2d(32), nn.ReLU(True),
+                nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1),     # (3, 128, 256)
+                nn.Sigmoid()
+            )
+
+        if size_decoder == "large":
+            self.decoder_input = nn.Linear(latent_dim, 1024 * 4 * 8)   # seed (1024, 4, 8)
+
+            self.decoder = nn.Sequential(
+                nn.Unflatten(dim=1, unflattened_size=(1024, 4, 8)),                # (1024, 4, 8)
+
+                nn.ConvTranspose2d(1024, 512, kernel_size=4, stride=2, padding=1), # (512, 8, 16)
+                nn.BatchNorm2d(512), nn.ReLU(True),
+
+                nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),  # (256, 16, 32)
+                nn.BatchNorm2d(256), nn.ReLU(True),
+
+                nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (128, 32, 64)
+                nn.BatchNorm2d(128), nn.ReLU(True),
+
+                nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # (64, 64, 128)
+                nn.BatchNorm2d(64), nn.ReLU(True),
+
+                nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),     # (3, 128, 256)
+                nn.Sigmoid()
+            )
+
 
     # ---- freezing helpers ----
     def freeze_all_vit(self):
@@ -277,9 +322,26 @@ def make_loaders_from_arrays_flexible(
 # =========================
 #  Train / Eval
 # =========================
-def make_optimizer(model, lr=1e-4, weight_decay=0.0):
-    params = [p for p in model.parameters() if p.requires_grad]
-    return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+def make_optimizer(model):
+    vit_params = []
+    head_params = []
+
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.startswith("encoder"):
+            vit_params.append(p)
+        else:
+            head_params.append(p)
+
+    return optim.AdamW(
+        [
+            {"params": vit_params, "lr": 1e-5},
+            {"params": head_params, "lr": 5e-5},
+        ],
+        weight_decay=1e-4,
+    )
+
 
 
 def run_one_epoch(model, loader, optimizer, criterion, device, train=True):
@@ -375,27 +437,58 @@ def sweep_thaw_depths_with_loaders(
     lr: float = 1e-4,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     save_grid_examples: bool = True,
+    inspect_variance: bool = True,
+    size_decoder: str = "small",
+    init_model_path: str = None,
 ):
     set_seed(123)
 
     results = []
     all_curves: Dict[int, List[float]] = {}
 
+    ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+
     for k in thaw_depths:
         print("\n" + "=" * 80)
         print(f"Setting: Unfreeze last {k} ViT blocks")
         print("=" * 80)
 
-        model = ViTVAE(latent_dim=latent_dim)
+        model = ViTVAE(latent_dim=latent_dim, size_decoder=size_decoder)
+
+        # Optionally load initial model weights from a provided checkpoint
+        if init_model_path:
+            try:
+                print(f"Loading initial weights from '{init_model_path}'...")
+                state = torch.load(init_model_path, map_location=device)
+
+                # Handle a few common checkpoint formats
+                if isinstance(state, dict):
+                    if "state_dict" in state and isinstance(state["state_dict"], dict):
+                        model.load_state_dict(state["state_dict"], strict=False)
+                    elif "state" in state and isinstance(state["state"], dict):
+                        # e.g. {'meta': ..., 'state': {...}}
+                        model.load_state_dict(state["state"], strict=False)
+                    else:
+                        # Assume plain state_dict
+                        model.load_state_dict(state, strict=False)
+                else:
+                    # Fallback: treat as plain state_dict
+                    model.load_state_dict(state, strict=False)
+
+                print("Successfully loaded initial model weights.")
+            except Exception as e:
+                print(f"[ERROR] Failed to load initial model weights from '{init_model_path}': {e}")
+
         model.unfreeze_last_k_vit_blocks(k=k, also_unfreeze_ln_head=True, also_unfreeze_embeddings=False)
         model = model.to(device)
 
         print(f"Trainable parameters: {count_trainable_params(model):,}")
 
         criterion = VAELoss(recon_type=recon_type, kl_weight=kl_weight)
-        optimizer = make_optimizer(model, lr=lr)
+        optimizer = make_optimizer(model)
 
         val_mse_curve = []
+        best_val = float("inf")
 
         for epoch in range(1, epochs_per_setting + 1):
             print(f"\n[Thaw={k}] Epoch {epoch}/{epochs_per_setting}")
@@ -407,31 +500,36 @@ def sweep_thaw_depths_with_loaders(
 
             val_mse_curve.append(val_metrics["mse"])
 
-            if save_grid_examples and epoch == epochs_per_setting:
+            if save_grid_examples:
                 model.eval()
                 with torch.no_grad():
                     imgs, _ = next(iter(val_loader))
                     imgs = imgs[:8].to(device)
                     recon, _, _ = model(imgs)
+
+                    # Here add the reconstruction new
                     os.makedirs("examples", exist_ok=True)
-                    save_grid(imgs, f"examples/input_thaw{k}.png")
-                    save_grid(recon, f"examples/recon_thaw{k}.png")
-                    print(f"Saved examples: examples/input_thaw{k}.png, examples/recon_thaw{k}.png")
+                    os.makedirs(f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}", exist_ok=True)
+                    save_grid(imgs, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/input_epoch{epoch}.png")
+                    save_grid(recon, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/recon_epoch{epoch}.png")
+                    reconstruction_check(model, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/epoch{epoch}_fullrecon.png")
+                    #print(f"Saved examples: examples/input_thaw{k}_latentdim{latent_dim}_decodersize{size_decoder}_epoch{epoch}.png, examples/recon_thaw{k}_latentdim{latent_dim}_decodersize{size_decoder}_epoch{epoch}.png")
+            
+            if inspect_variance:
+                with torch.no_grad():
+                    imgs, _ = next(iter(val_loader))
+                    imgs = imgs[:32].to(device)
+                    mu, logvar = model.encode(imgs)
+                    print(f"Latent mu mean {mu.mean().item():.4f}, std {mu.std().item():.4f}; logvar mean {logvar.mean().item():.4f}")
+
 
             # Save model parameters for this thaw setting
             os.makedirs("models", exist_ok=True)
-            full_path = os.path.join("models", f"vitvae_thaw{k}.pt")
-            try:
-                torch.save(model.state_dict(), full_path)
-                # Also save decoder-only weights for quick loading in downstream BO
-                decoder_path = os.path.join("models", f"vitvae_decoder_thaw{k}_latent{latent_dim}.pt")
-                dec_state = {kname: v for kname, v in model.state_dict().items() if kname.startswith("decoder") or kname.startswith("decoder_input")}
-                # include metadata
-                meta = {"latent_dim": latent_dim, "recon_size": (128, 256)}
-                torch.save({"meta": meta, "state": dec_state}, decoder_path)
-                print(f"Saved model state: {full_path} and decoder: {decoder_path}")
-            except Exception as e:
-                print(f"[WARN] Failed to save model for thaw={k}: {e}")
+            full_path = os.path.join("models", f"vitvae_thaw{k}_latent{latent_dim}_decodersize{size_decoder}_{ts}.pt")
+            #if val_metrics["mse"] < best_val:
+            #    print(f'Best validation performance so far for thaw={k}, saving model to', full_path)
+            #    best_val = val_metrics["mse"]
+            torch.save(model.state_dict(), full_path)
 
         all_curves[k] = val_mse_curve
         agg = sum(val_mse_curve[-2:]) / 2.0 if len(val_mse_curve) >= 2 else val_mse_curve[-1]
@@ -469,6 +567,72 @@ def sweep_thaw_depths_with_loaders(
 
     return results, all_curves
 
+from reconstruction_check import load_images_as_nhwc, stretch, save_side_by_side_2x4
+
+def reconstruction_check(model, output_file):
+
+    # -------------------------
+    # Load images
+    # -------------------------
+    paths, orig_nhwc = load_images_as_nhwc("outputs/designs/mbb_beam_384x64_0.4-20260111-164330/images", resize=(128, 256))
+    print("Found images:", len(paths), "example shape (H,W,C):", orig_nhwc.shape[1:])
+
+    # Convert to NCHW using the SAME permutation used for training:
+    # training used: (N, H=256, W=128, C=3) -> (N, 3, 128, 256) via permute(0,3,2,1)
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    orig_nchw = torch.from_numpy(orig_nhwc).permute(0,3,2,1).contiguous().float().to(DEVICE)
+    print("Converted to NCHW for model:", orig_nchw.shape, "  (N,C,H,W)")
+
+    # -------------------------
+    # Run model (same path as training: encode -> reparameterize -> decode)
+    # -------------------------
+    recons = []
+    mus = []
+    logvars = []
+    with torch.no_grad():
+        for i in range(0, len(orig_nchw), 8):
+            batch = orig_nchw[i:i+8]
+            # use the exact forward behavior from training:
+            # forward() does encode->reparam->decode, but call encode/reparam/decode explicitly for diagnostics
+            mu, logvar = model.encode(batch)
+            z = model.reparameterize(mu, logvar)
+            recon = model.decode(z)   # (B,3,128,256)
+            recons.append(recon.cpu())
+            mus.append(mu.cpu())
+            logvars.append(logvar.cpu())
+
+    recon_nchw = torch.cat(recons, dim=0)
+    mu_all = torch.cat(mus, dim=0)
+    logvar_all = torch.cat(logvars, dim=0)
+    print("recon_nchw.shape:", recon_nchw.shape)
+    print("mu mean/std:", float(mu_all.mean()), float(mu_all.std()))
+    print("logvar mean:", float(logvar_all.mean()))
+
+    # Convert recon back to ORIGINAL disk NHWC layout:
+    # recon_nchw is (N,3,128,256); to get disk layout (N,256,128,3) do permute(0,3,2,1)
+    recon_nhwc = recon_nchw.permute(0,3,2,1).numpy()
+
+    # -------------------------
+    # Sanity checks & metrics
+    # -------------------------
+    assert orig_nhwc.shape == recon_nhwc.shape, f"shape mismatch orig={orig_nhwc.shape} recon={recon_nhwc.shape}"
+
+    mse = float(np.mean((orig_nhwc - recon_nhwc) ** 2))
+    psnr = psnr_from_mse(mse)
+    print(f"Overall MSE: {mse:.6e}  PSNR: {psnr:.2f} dB")
+
+    # Save side-by-side comparison
+    # Stretch width to make square for visualization
+    orig_sq  = stretch(orig_nhwc, target_height=128, target_width=256)
+    recon_sq = stretch(recon_nhwc, target_height=128, target_width=256)
+
+    save_side_by_side_2x4(orig_sq, recon_sq, output_file)
+
+    print("Saved comparison to:", output_file)
+
+
+
+
 
 # =========================
 #  Example main for your arrays
@@ -483,15 +647,32 @@ if __name__ == "__main__":
     # --- Configuration: edit these paths to point to your image folders ---
     CONFIG = {
         # list of directories containing PNG/JPEG images for training
-        'train_dirs':['outputs/augmented/designs/mbb_beam_384x64_0.4-20260111-164330'],
+        'train_dirs':['outputs/augmented/mbb_beam_384x64_0.4-20260111-164330',
+                    'outputs/augmented/mbb_beam_384x64_0.4-20260111-201703',
+                    'outputs/augmented/mbb_beam_384x64_0.4-20260111-221249',
+                    'outputs/augmented/mbb_beam_384x64_0.4-20260113-231654',
+
+                      #'outputs/designs/mbb_beam_384x64_0.4-20260111-164330',
+                      #'outputs/designs/mbb_beam_384x64_0.4-20260111-201703',
+                      #'outputs/designs/mbb_beam_384x64_0.4-20260111-221249',
+                      #'outputs/designs/mbb_beam_384x64_0.4-20260113-231654',
+                      ],
         # list of directories for validation / holdout
-        'val_dirs': ['outputs/designs/mbb_beam_384x64_0.4-20260111-164330/images'],
+        'val_dirs': ['outputs/augmented/mbb_beam_384x64_0.4-20260113-223144/images',
+                     #'outputs/designs/mbb_beam_384x64_0.4-20260113-223144/images',
+                     #'outputs/designs/mbb_beam_384x64_0.4-20260111-201703',
+                     'outputs/augmented/mbb_beam_384x64_0.4-20260113-205758/images',
+                     #'outputs/designs/mbb_beam_384x64_0.4-20260113-205758/images',
+                    ],
         # desired in-memory image size: (width, height) for PIL resize
         'resize': (128, 256),
         # whether to treat input files as uint8 and normalize automatically
         'normalize_from_uint8': True,
-        'batch_size': 16,
+        'batch_size': 32,
         'num_workers': 4,
+        # Optional: path to a checkpoint with initial model weights
+        # Example: 'models/vitvae_thaw1_latent16_decodersizemedium_20260111-120000.pt'
+        'init_model_path': None,
     }
 
 
@@ -556,14 +737,22 @@ if __name__ == "__main__":
         num_workers=CONFIG['num_workers'],
         normalize_from_uint8=CONFIG['normalize_from_uint8'],
     )
-
-    thaw_settings = [2]  # 2 = my best choice
-    results, curves = sweep_thaw_depths_with_loaders(
-        train_loader, val_loader,
-        thaw_depths=thaw_settings,
-        epochs_per_setting=15,
-        latent_dim=8, # 16 my best choice
-        recon_type="bce",
-        kl_weight=1e-2,
-        lr=1e-4,
-    )
+    
+    thaw_settings = [1]  # 2 = my best choice
+    init_model_path = CONFIG.get('init_model_path')
+    for thaw in thaw_settings:
+        print(f"Testing thaw setting {thaw} with 6 epochs...")
+        for latent_dim in [16]:
+            print(f"  Latent dim {latent_dim}...")
+            for decoder_size in ["medium"]:
+                print(f"    Decoder size {decoder_size}...")
+                results, curves = sweep_thaw_depths_with_loaders(
+                    train_loader, val_loader,
+                    thaw_depths=[thaw],
+                    epochs_per_setting=12,
+                    latent_dim=latent_dim,
+                    recon_type="mse",
+                    kl_weight=5e-3,
+                    size_decoder=decoder_size,
+                    init_model_path=init_model_path,
+                )
