@@ -27,9 +27,9 @@ import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 
-# =========================
+
 #  Utilities
-# =========================
+
 def set_seed(seed: int = 0):
     random.seed(seed)
     np.random.seed(seed)
@@ -47,14 +47,10 @@ def count_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# =========================
 #  Model
-# =========================
 class ViTVAE(nn.Module):
     """
     ViT encoder (CLS token -> latent) + lightweight ConvTranspose decoder to (3, 128, 256).
-    Decoder channels have been reduced by one power-of-two compared to the original:
-    seed channels 512 -> 256, then 256->128->64->32->16->3.
     """
     def __init__(self, latent_dim=16, vit_name='google/vit-base-patch16-224-in21k', size_decoder: str = "small"):
         super().__init__()
@@ -160,6 +156,29 @@ class ViTVAE(nn.Module):
                 nn.Sigmoid()
             )
 
+        if size_decoder == "xxlarge":
+            # 1.25x xlarge: extra capacity without exploding parameter count
+            self.decoder_input = nn.Linear(latent_dim, 2560 * 4 * 8)  # seed (2560, 4, 8)
+
+            self.decoder = nn.Sequential(
+                nn.Unflatten(dim=1, unflattened_size=(2560, 4, 8)),  # (2560, 4, 8)
+
+                nn.ConvTranspose2d(2560, 1280, 4, 2, 1),  # (1280, 8, 16)
+                nn.BatchNorm2d(1280), nn.ReLU(True),
+
+                nn.ConvTranspose2d(1280, 640, 4, 2, 1),   # (640, 16, 32)
+                nn.BatchNorm2d(640), nn.ReLU(True),
+
+                nn.ConvTranspose2d(640, 320, 4, 2, 1),    # (320, 32, 64)
+                nn.BatchNorm2d(320), nn.ReLU(True),
+
+                nn.ConvTranspose2d(320, 160, 4, 2, 1),    # (160, 64, 128)
+                nn.BatchNorm2d(160), nn.ReLU(True),
+
+                nn.ConvTranspose2d(160, 3, 4, 2, 1),      # (3, 128, 256)
+                nn.Sigmoid()
+            )
+
 
     # ---- freezing helpers ----
     def freeze_all_vit(self):
@@ -247,9 +266,7 @@ class ViTVAE(nn.Module):
         return recon, mu, logvar
 
 
-# =========================
-#  Loss
-# =========================
+
 class VAELoss(nn.Module):
     def __init__(self, recon_type="mse", kl_weight=1e-3, recon_weight=1.0, binarization_weight=0.0):
         super().__init__()
@@ -274,9 +291,7 @@ class VAELoss(nn.Module):
         return loss, recon_loss.detach(), kld.detach()
 
 
-# =========================
-#  Data: from your arrays
-# =========================
+
 def make_loaders_from_arrays_flexible(
     train_images,          # np.ndarray or torch.Tensor
     test_images,           # np.ndarray or torch.Tensor
@@ -299,17 +314,14 @@ def make_loaders_from_arrays_flexible(
         elif not isinstance(x, torch.Tensor):
             raise TypeError("Expected np.ndarray or torch.Tensor")
 
-        # If uint8 0..255 and user didnâ€™t request normalization, warn-raise
         if x.dtype == torch.uint8 and not normalize_from_uint8:
             raise ValueError("Input is uint8; pass normalize_from_uint8=True or normalize beforehand.")
 
-        # Normalize if requested
         if normalize_from_uint8 and x.dtype == torch.uint8:
             x = x.float() / 255.0
         else:
             x = x.float()
 
-        # Detect shape layout
         if x.ndim != 4:
             raise ValueError(f"Expected 4D tensor/array, got shape {tuple(x.shape)}")
 
@@ -317,7 +329,7 @@ def make_loaders_from_arrays_flexible(
             # Already NCHW
             pass
         elif x.shape[-1] == 3 and x.shape[1] == 256 and x.shape[2] == 128:
-            # NHWC -> NCHW with (H=256, W=128) -> (C=3, H=128, W=256)
+            
             x = x.permute(0, 3, 2, 1)
         else:
             raise ValueError(
@@ -325,7 +337,7 @@ def make_loaders_from_arrays_flexible(
                 "Supported: (N,3,128,256) or (N,256,128,3)."
             )
 
-        # Ensure range [0,1]
+        
         if x.min() < -1e-6 or x.max() > 1.0 + 1e-6:
             raise ValueError("Values out of [0,1]. Normalize your inputs or set normalize_from_uint8=True.")
 
@@ -342,9 +354,7 @@ def make_loaders_from_arrays_flexible(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=pin)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin)
     return train_loader, test_loader
-# =========================
-#  Train / Eval
-# =========================
+
 def make_optimizer(model):
     vit_params = []
     head_params = []
@@ -449,15 +459,12 @@ def save_grid(imgs, path, nrow=4, rotate90: bool = False):
     for i in range(len(axes)):
         axes[i].axis("off")
         if i < b:
-            # Convert internal tensor (C,H,W) back to original saved layout (H_orig= W, W_orig= H, C)
-            # Our dataset originally produced NHWC images of shape (256,128,3) which were
-            # converted to NCHW (3,128,256). To show the original orientation we need
-            # to permute (2,1,0) -> (W,H,C) == (256,128,3).
+            
             if h == 128 and w == 256:
                 img = imgs[i].permute(2, 1, 0).cpu().numpy()
             else:
                 img = imgs[i].permute(1, 2, 0).cpu().numpy()
-            # Optionally rotate 90 degrees counter-clockwise for visualization
+            
             if rotate90:
                 import numpy as _np
                 img = _np.rot90(img, k=1)
@@ -467,9 +474,7 @@ def save_grid(imgs, path, nrow=4, rotate90: bool = False):
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
 
-# =========================
-#  Sweep
-# =========================
+
 def sweep_thaw_depths_with_loaders(
     train_loader: DataLoader,
     val_loader: DataLoader,
@@ -505,18 +510,17 @@ def sweep_thaw_depths_with_loaders(
                 print(f"Loading initial weights from '{init_model_path}'...")
                 state = torch.load(init_model_path, map_location=device)
 
-                # Handle a few common checkpoint formats
+               
                 if isinstance(state, dict):
                     if "state_dict" in state and isinstance(state["state_dict"], dict):
                         model.load_state_dict(state["state_dict"], strict=False)
                     elif "state" in state and isinstance(state["state"], dict):
-                        # e.g. {'meta': ..., 'state': {...}}
                         model.load_state_dict(state["state"], strict=False)
                     else:
-                        # Assume plain state_dict
+                        
                         model.load_state_dict(state, strict=False)
                 else:
-                    # Fallback: treat as plain state_dict
+                    
                     model.load_state_dict(state, strict=False)
 
                 print("Successfully loaded initial model weights.")
@@ -531,11 +535,28 @@ def sweep_thaw_depths_with_loaders(
         criterion = VAELoss(recon_type=recon_type, kl_weight=kl_weight)
         optimizer = make_optimizer(model)
 
+        # KL annealing schedule: epoch -> kl_weight
+        kl_schedule = {
+            1:  1e-3,
+            4:  5e-3,
+            8:  2e-2,
+            12: 5e-2,
+            16:1e-1,
+            18:2e-1,
+        }
+
+        def get_kl_weight(epoch):
+            return max(v for k, v in kl_schedule.items() if k <= epoch)
+
         val_mse_curve = []
         best_val = float("inf")
 
         for epoch in range(1, epochs_per_setting + 1):
-            print(f"\n[Thaw={k}] Epoch {epoch}/{epochs_per_setting}")
+
+            # KL annealing
+            current_kl = get_kl_weight(epoch)
+            criterion.kl_weight = current_kl
+            print(f"\n[Thaw={k}] Epoch {epoch}/{epochs_per_setting}  kl_weight={current_kl:.4f}")
             train_metrics = run_one_epoch(model, train_loader, optimizer, criterion, device, train=True)
             val_metrics   = run_one_epoch(model, val_loader,   optimizer, criterion, device, train=False)
 
@@ -561,8 +582,7 @@ def sweep_thaw_depths_with_loaders(
                     save_grid(imgs, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/input_epoch{epoch}.png")
                     save_grid(recon, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/recon_epoch{epoch}.png")
                     reconstruction_check(model, f"examples/thaw{k}_latent{latent_dim}_dec{size_decoder}_{ts}/epoch{epoch}_fullrecon.png")
-                    #print(f"Saved examples: examples/input_thaw{k}_latentdim{latent_dim}_decodersize{size_decoder}_epoch{epoch}.png, examples/recon_thaw{k}_latentdim{latent_dim}_decodersize{size_decoder}_epoch{epoch}.png")
-            
+                    
             if inspect_variance:
                 with torch.no_grad():
                     imgs, _ = next(iter(val_loader))
@@ -583,7 +603,7 @@ def sweep_thaw_depths_with_loaders(
         agg = sum(val_mse_curve[-2:]) / 2.0 if len(val_mse_curve) >= 2 else val_mse_curve[-1]
         results.append({"thaw_blocks": k, "val_mse": agg})
 
-    # Plot standard curve
+    
     xs = [r["thaw_blocks"] for r in results]
     ys = [r["val_mse"] for r in results]
     order = sorted(range(len(xs)), key=lambda i: xs[i])
@@ -599,7 +619,7 @@ def sweep_thaw_depths_with_loaders(
     plt.savefig("figures/standard_curve_vit_thaw_vs_mse.png", dpi=180)
     print("\nSaved curve to figures/standard_curve_vit_thaw_vs_mse.png")
 
-    # Per-setting curves
+    
     plt.figure(figsize=(7,5))
     for k, curve in sorted(all_curves.items(), key=lambda kv: kv[0]):
         plt.plot(range(1, len(curve)+1), curve, marker=".", label=f"thaw={k}")
@@ -625,14 +645,13 @@ def reconstruction_check(model, output_file):
     paths, orig_nhwc = load_images_as_nhwc("outputs/designs/mbb_beam_384x64_0.4-20260111-164330/images", resize=(128, 256))
     print("Found images:", len(paths), "example shape (H,W,C):", orig_nhwc.shape[1:])
 
-    # Convert to NCHW using the SAME permutation used for training:
-    # training used: (N, H=256, W=128, C=3) -> (N, 3, 128, 256) via permute(0,3,2,1)
+    # Convert to NCHW using the SAME permutation 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     orig_nchw = torch.from_numpy(orig_nhwc).permute(0,3,2,1).contiguous().float().to(DEVICE)
     print("Converted to NCHW for model:", orig_nchw.shape, "  (N,C,H,W)")
 
     # -------------------------
-    # Run model (deterministic path: encode -> decode with z = mu)
+    # Run model deterministic path: encode -> decode with z = mu (no sampling)
     # -------------------------
     recons = []
     mus = []
@@ -640,7 +659,7 @@ def reconstruction_check(model, output_file):
     with torch.no_grad():
         for i in range(0, len(orig_nchw), 8):
             batch = orig_nchw[i:i+8]
-            # Deterministic reconstruction: z = mu (no sampling)
+           
             mu, logvar = model.encode(batch)
             z = mu
             recon = model.decode(z)   # (B,3,128,256)
@@ -656,12 +675,8 @@ def reconstruction_check(model, output_file):
     print("logvar mean:", float(logvar_all.mean()))
 
     # Convert recon back to ORIGINAL disk NHWC layout:
-    # recon_nchw is (N,3,128,256); to get disk layout (N,256,128,3) do permute(0,3,2,1)
     recon_nhwc = recon_nchw.permute(0,3,2,1).numpy()
 
-    # -------------------------
-    # Sanity checks & metrics
-    # -------------------------
     assert orig_nhwc.shape == recon_nhwc.shape, f"shape mismatch orig={orig_nhwc.shape} recon={recon_nhwc.shape}"
 
     mse = float(np.mean((orig_nhwc - recon_nhwc) ** 2))
@@ -680,11 +695,6 @@ def reconstruction_check(model, output_file):
 
 
 
-
-
-# =========================
-#  Example main for your arrays
-# =========================
 if __name__ == "__main__":
     """
     Replace the two lines below with your actual arrays, or import them.
@@ -692,7 +702,7 @@ if __name__ == "__main__":
       train_images: (N, 256, 128, 3)  | test_images: (M, 256, 128, 3)
       values in [0,1] or set normalize_from_uint8=True
     """
-    # --- Configuration: edit these paths to point to your image folders ---
+    
     CONFIG = {
         # list of directories containing PNG/JPEG images for training
         'train_dirs':['outputs/augmented/mbb_beam_384x64_0.4-20260111-164330',
@@ -705,7 +715,7 @@ if __name__ == "__main__":
                       #'outputs/designs/mbb_beam_384x64_0.4-20260111-221249',
                       #'outputs/designs/mbb_beam_384x64_0.4-20260113-231654',
                       ],
-        # list of directories for validation / holdout
+        # list of directories for validation
         'val_dirs': ['outputs/augmented/mbb_beam_384x64_0.4-20260113-223144/images',
                      #'outputs/designs/mbb_beam_384x64_0.4-20260113-223144/images',
                      #'outputs/designs/mbb_beam_384x64_0.4-20260111-201703',
@@ -788,14 +798,14 @@ if __name__ == "__main__":
     
     
     init_model_path = CONFIG.get('init_model_path')
-    for thaw, decoder_size in zip([3, 2], ["large", "xlarge"]):
+    for thaw, decoder_size, latent, loss in zip([5], ["xxlarge"], [8], ["bce"]):
         results, curves = sweep_thaw_depths_with_loaders(
             train_loader, val_loader,
             thaw_depths=[thaw],
             epochs_per_setting=20,
-            latent_dim=16,
-            recon_type="mse",
-            kl_weight=5e-3,
+            latent_dim=latent, # try 8 as well
+            recon_type=loss, # try bce as well
+            kl_weight=0.0,
             size_decoder=decoder_size,
             init_model_path=init_model_path,
         )

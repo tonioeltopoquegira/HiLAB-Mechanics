@@ -45,13 +45,13 @@ def main():
         'output_dir': 'outputs/designs',
         'problem': 'mbb_beam_384x64_0.4', #'',
         'opt_steps': 200,
-        'volfrac': 0.3,
+        'volfrac': 0.4,
         'penal_start': None,
         'penal_end': None,
         'penal_power': None,
-        'seed': 142,
+        'seed': 1301,
         # how many designs to create per method (different seeds)
-        'n_designs_per_method': 20,
+        'n_designs_per_method': 200,
         # binarization threshold
         'binarize_threshold': 0.5,
         # if True, only save the left half of the design (mirrored symmetry)

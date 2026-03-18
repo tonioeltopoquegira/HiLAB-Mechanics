@@ -23,18 +23,21 @@ from PIL import Image
 import scipy.ndimage as ndi
 
 
-SIGMAS = (0.5, 1.0, 1.5, 2.0)
+SIGMAS = (0.5, 1.0, 1.5, 2.0, 2.5)
 
 # Top-level configuration dict (edit this directly; no CLI).
 CONFIG = {
     # list of input folders to collect images from
-    'input_dirs': ['outputs/designs'],
+    'input_dirs': ['outputs/designs/mbb_beam_384x64_0.4-20260113-231654'],
     # where to write augmented images (mirrors input structure under this dir)
-    'output_dir': 'outputs/augmented',
+    'output_dir': 'outputs/augmented/',
     # gaussian sigmas (pixels)
     'sigmas': list(SIGMAS),
     # scale factor used to convert sigma -> morphology kernel size
     'kernel_scale': 0.5,
+    'sigmas_erode': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    'sigmas_dilate': [0.5, 1.0],
+    'sigmas_gaussian': [0.1],
     # final binarization threshold for outputs
     'binarize_threshold': 0.5,
 }
@@ -66,46 +69,77 @@ def morphological_dilate(img: np.ndarray, size: int) -> np.ndarray:
     return ndi.grey_dilation(img, size=(size, size))
 
 
-def augment_image(path: Path, out_dir: Path, sigmas: Sequence[float], kernel_scale: float, bin_thresh: float) -> None:
-    """Augment a single image and save binary outputs under out_dir.
-
-    out_dir should already be created by the caller and should mirror the
-    intended output location for this input file.
-    """
+def augment_image(
+    path: Path,
+    out_dir: Path,
+    sigmas_erode: Sequence[float],
+    sigmas_dilate: Sequence[float],
+    sigmas_gaussian: Sequence[float],
+    kernel_scale: float,
+    bin_thresh: float,
+    ) -> None:
     img = load_gray(path)
     stem = path.stem
 
-    for sigma in sigmas:
-        blurred = ndi.gaussian_filter(img, sigma=sigma)
-
-        # Determine morphological kernel size from sigma.
+    # ---- erosion ----
+    for sigma in sigmas_erode:
         k = max(1, int(np.ceil(2.0 * sigma * kernel_scale)))
 
-        # Apply morphology on the blurred image, then re-threshold to binary
-        eroded = morphological_erode(blurred, k)
-        dilated = morphological_dilate(blurred, k)
-
-        # binarize results (final designs must be binary)
-        blurred_bin = (blurred >= bin_thresh).astype(np.float32)
+        eroded = morphological_erode(img, k)
         eroded_bin = (eroded >= bin_thresh).astype(np.float32)
+
+        # non-binarized
+        out_erode_gray = out_dir / f"{stem}_erode_s{sigma:.1f}_k{k}_gray.png"
+        save_gray(eroded, out_erode_gray)
+
+        # binarized
+        out_erode_bin = out_dir / f"{stem}_erode_s{sigma:.1f}_k{k}_bin.png"
+        save_gray(eroded_bin, out_erode_bin)
+
+
+    # ---- dilation ----
+    for sigma in sigmas_dilate:
+        k = max(1, int(np.ceil(2.0 * sigma * kernel_scale)))
+
+        dilated = morphological_dilate(img, k)
         dilated_bin = (dilated >= bin_thresh).astype(np.float32)
 
-        # Save binary outputs
-        out_blur = out_dir / f"{stem}_g{sigma:.1f}_binary.png"
-        save_gray(blurred_bin, out_blur)
+        # non-binarized
+        out_dilate_gray = out_dir / f"{stem}_dilate_s{sigma:.1f}_k{k}_gray.png"
+        save_gray(dilated, out_dilate_gray)
 
-        out_erode = out_dir / f"{stem}_g{sigma:.1f}_erode_binary_k{k}.png"
-        save_gray(eroded_bin, out_erode)
+        # binarized
+        out_dilate_bin = out_dir / f"{stem}_dilate_s{sigma:.1f}_k{k}_bin.png"
+        save_gray(dilated_bin, out_dilate_bin)
+    
+    # ---- gaussian blur ----
+    for sigma_g in sigmas_gaussian:
+        blurred = ndi.gaussian_filter(img, sigma=sigma_g)
 
-        out_dilate = out_dir / f"{stem}_g{sigma:.1f}_dilate_binary_k{k}.png"
-        save_gray(dilated_bin, out_dilate)
+        # save blurred (non-binary)
+        save_gray(
+            blurred,
+            out_dir / f"{stem}_gauss_s{sigma_g:.1f}_gray.png"
+        )
+
+        blurred_bin = (blurred >= 0.9).astype(np.float32)
+
+        save_gray(
+            blurred_bin,
+            out_dir / f"{stem}_gauss_s{sigma_g:.1f}_bin.png"
+        )
+
+
+
 
 
 def main():
     cfg = CONFIG
     input_dirs = [Path(p) for p in cfg.get('input_dirs', [])]
     out_root = Path(cfg.get('output_dir', 'outputs/augmented')).resolve()
-    sigmas = list(cfg.get('sigmas', SIGMAS))
+    sigmas_erode = cfg.get('sigmas_erode', [])
+    sigmas_dilate = cfg.get('sigmas_dilate', [])
+    sigmas_gaussian = cfg.get('sigmas_gaussian', [])
     kernel_scale = float(cfg.get('kernel_scale', 1.0))
     bin_thresh = float(cfg.get('binarize_threshold', 0.5))
 
@@ -129,7 +163,7 @@ def main():
             rel = fpath.relative_to(input_root)
             out_dir = out_root / input_root.name / rel.parent
             out_dir.mkdir(parents=True, exist_ok=True)
-            augment_image(fpath, out_dir, sigmas=sigmas, kernel_scale=kernel_scale, bin_thresh=bin_thresh)
+            augment_image(fpath, out_dir, sigmas_erode=sigmas_erode, sigmas_dilate=sigmas_dilate, sigmas_gaussian=sigmas_gaussian, kernel_scale=kernel_scale, bin_thresh=bin_thresh)
         except Exception as e:
             print(f"Failed to augment {fpath}: {e}")
         if i % 50 == 0:
