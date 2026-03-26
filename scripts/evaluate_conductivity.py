@@ -90,7 +90,7 @@ def _to_gray_batch(design: Union[np.ndarray, Any]) -> np.ndarray:
     return gray
 
 
-def _resize_to_square(gray: np.ndarray, size: int = 128) -> np.ndarray:
+def _resize_to_square(gray: np.ndarray, size: int = 64) -> np.ndarray:
     """Resize each grayscale image in a batch to (size, size) via PIL.
 
     gray: (B, H, W) in [0,1]
@@ -108,64 +108,8 @@ def _resize_to_square(gray: np.ndarray, size: int = 128) -> np.ndarray:
     return out
 
 
-def _fourier_solver_single(conductivity_matrix: np.ndarray) -> Tuple[np.ndarray, float]:
-    """Solve potential and effective conductivity for a single 2D field.
-
-    Args:
-        conductivity_matrix: 2D array (N, N) with conductivity values.
-
-    Returns:
-        potential: (N, N) temperature / potential field.
-        kappa_eff: scalar effective conductivity.
-    """
-    from matinverse import Geometry2D, BoundaryConditions, Fourier  # type: ignore
-    import jax.numpy as jnp  # type: ignore
-
-    cond = np.asarray(conductivity_matrix, dtype=np.float32)
-    if cond.ndim != 2:
-        raise ValueError(f"Expected 2D conductivity matrix, got {cond.shape}")
-
-    H, W = cond.shape
-    if H != W:
-        N = min(H, W)
-        cond = cond[:N, :N]
-    else:
-        N = H
-
-    # Optionally downsample very large grids for speed (not critical here)
-    if N > 128:
-        factor = max(1, N // 128)
-        cond = cond[::factor, ::factor]
-        N = cond.shape[0]
-
-    cond_flat = cond.flatten()
-    cond_flat = jnp.array(cond_flat, dtype=jnp.float32)
-
-    size = [1.0, 1.0]
-    grid = [N, N]
-
-    geo = Geometry2D(grid, size, periodic=[True, True])
-    fourier = Fourier(geo)
-
-    bcs = BoundaryConditions(geo)
-    bcs.periodic('y', lambda batch, space, t: 1.0)
-    bcs.periodic('x', lambda batch, space, t: 0.0)
-
-    cond_field = cond_flat
-
-    def kappa_map(batch, space, temp, t):
-        sigma = cond_field[space]
-        return jnp.array([[sigma, 0.0], [0.0, sigma]], dtype=jnp.float32)
-
-    output = fourier(kappa_map, bcs, batch_size=1)
-
-    potential = np.array(output['T']).reshape((N, N))
-    kappa_eff = float(output['kappa_effective'])
-    return potential, kappa_eff
-
-
 def fourier_solver(conductivity: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Run the Fourier solver on one or more conductivity fields.
+    """Run the Fourier solver on one or more conductivity fields (batched).
 
     Args:
       conductivity: np.ndarray of shape (N, N) or (B, N, N).
@@ -173,25 +117,63 @@ def fourier_solver(conductivity: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
       T: np.ndarray of shape (B, N, N) with temperature fields.
       kappa_effective: np.ndarray of shape (B,) effective conductivities.
     """
-    cond = np.asarray(conductivity, dtype=np.float32)
+    import jax.numpy as jnp  # type: ignore
+    from matinverse import Geometry2D, BoundaryConditions, Fourier  # type: ignore
 
+    # Use float64 to match MatInverse's x64 configuration
+    cond = np.asarray(conductivity, dtype=np.float64)
+
+    # Ensure batch dimension
     if cond.ndim == 2:
-        potential, kappa_eff = _fourier_solver_single(cond)
-        return potential[None, ...], np.array([kappa_eff], dtype=np.float32)
-
+        cond = cond[None, ...]  # (1, N, N)
     if cond.ndim != 3 or cond.shape[1] != cond.shape[2]:
         raise ValueError(f"Expected conductivity of shape (B,N,N) or (N,N), got {cond.shape}")
 
     B, N, _ = cond.shape
-    potentials = []
-    kappas = []
-    for i in range(B):
-        pot_i, k_i = _fourier_solver_single(cond[i])
-        potentials.append(pot_i)
-        kappas.append(k_i)
 
-    T = np.stack(potentials, axis=0)
-    kappa_effective = np.array(kappas, dtype=np.float32)
+    # Optionally downsample very large grids for speed
+    if N > 128:
+        factor = max(1, N // 128)
+        cond = cond[:, ::factor, ::factor]
+        _, N, _ = cond.shape
+
+    # Flatten spatial dims: (B, N, N) -> (B, N*N)
+    cond_flat = jnp.asarray(cond.reshape(B, N * N), dtype=jnp.float64)
+
+    # Cache geometry + Fourier per resolution to avoid re-creating them
+    global _FOURIER_CACHE
+    try:
+        _ = _FOURIER_CACHE
+    except NameError:
+        _FOURIER_CACHE = {}
+
+    key = ("2D", N)
+    if key not in _FOURIER_CACHE:
+        size = [1.0, 1.0]
+        grid = [N, N]
+        geo = Geometry2D(grid, size, periodic=[True, True])
+        fourier = Fourier(geo)
+        _FOURIER_CACHE[key] = (geo, fourier)
+    else:
+        geo, fourier = _FOURIER_CACHE[key]
+
+    bcs = BoundaryConditions(geo)
+    # Unit temperature drop in y, zero in x
+    bcs.periodic("y", lambda batch, space, t: 1.0)
+    bcs.periodic("x", lambda batch, space, t: 0.0)
+
+    kappa_bulk = jnp.eye(2, dtype=jnp.float64)
+
+    def kappa_map(batch, space, temp, t):
+        k = cond_flat[batch, space]
+        return kappa_bulk * k
+
+    output = fourier(kappa_map, bcs, batch_size=B)
+
+    T = np.array(output["T"]).reshape(B, N, N)
+    # Ensure we always return shape (B,) even if batch_size=1
+    kappa_effective = np.array(output["kappa_effective"], dtype=np.float32).reshape(-1)
+
     return T, kappa_effective
 
 
@@ -243,7 +225,7 @@ def plot_temperature_fourier(Temperatures: np.ndarray,
 
 def evaluate_design_conductivity(
     design: Union[np.ndarray, Any],
-    solver_res: int = 128,
+    solver_res: int = 64,
     kappa_solid: float = 1.0,
     kappa_void: float = 1e-3,
     binarize: bool = True,
@@ -318,18 +300,63 @@ if __name__ == "__main__":
     import os
 
     # Dummy checker on random binary designs
-    dummy = np.random.rand(4, 128, 256).astype(np.float32)
-    T, kappa_eff, cond = evaluate_design_conductivity(dummy, solver_res=128)
+    dummy = np.random.rand(4, 64, 64).astype(np.float32)
+    T, kappa_eff, cond = evaluate_design_conductivity(dummy, solver_res=64)
     print("Dummy kappa_eff:", kappa_eff)
 
     # Configuration for dataset experiment on generated designs
     DESIGN_DIRS = [
-        "outputs/designs/mbb_beam_384x64_0.4-20260111-164330/images",
+        "outputs/designs/mbb_beam_384x64_0.4-20260113-231654/images",
+        #"outputs/designs/mbb_beam_384x64_0.4-20260111-164330/images"
     ]
 
     if DESIGN_DIRS:
+        import time
+
         paths, imgs = _load_augmented_images(DESIGN_DIRS)
-        T_all, kappa_all, cond_all = evaluate_design_conductivity(imgs, solver_res=128)
+
+        # Warm-up JIT/compiler
+        _ = evaluate_design_conductivity(imgs[:2], solver_res=64)
+
+        # Batched solve timing in chunks (e.g. batch_size = 16)
+        batch_size = 16
+        t0 = time.time()
+        all_T = []
+        all_k = []
+        all_c = []
+        for i in range(0, len(paths), batch_size):
+            t_inside = time.time()
+            T_b, k_b, c_b = evaluate_design_conductivity(
+                imgs[i:i + batch_size], solver_res=64
+            )
+            print(f"Batch {i // batch_size + 1}: solved {min(batch_size, len(paths) - i)} images in {time.time() - t_inside:.3f}s")
+            all_T.append(T_b)
+            all_k.append(k_b)
+            all_c.append(c_b)
+        t1 = time.time()
+        dt_batched = t1 - t0
+        T_all = np.concatenate(all_T, axis=0)
+        kappa_all = np.concatenate(all_k, axis=0)
+        cond_all = np.concatenate(all_c, axis=0)
+        print(f"Batched (chunks of {batch_size}) solve: {dt_batched:.3f}s for {len(paths)} images "
+              f"({1e3 * dt_batched / len(paths):.2f} ms/img)")
+
+        # Loop solve timing (call on each image separately)
+        t0 = time.time()
+        k_loop = []
+        for i in range(len(paths)):
+            _, k_i, _ = evaluate_design_conductivity(imgs[i:i+1], solver_res=64)
+            # k_i is 1D, length 1
+            k_loop.append(float(k_i.reshape(-1)[0]))
+        t1 = time.time()
+        dt_loop = t1 - t0
+        print(f"Loop solve:   {dt_loop:.3f}s for {len(paths)} images "
+              f"({1e3 * dt_loop / len(paths):.2f} ms/img)")
+
+        # Sanity check that batched vs looped conductivities agree
+        k_loop = np.array(k_loop, dtype=np.float32)
+        print("Max |kappa_batched - kappa_loop| =",
+              float(np.max(np.abs(kappa_all - k_loop))))
 
         # Summary statistics over all designs
         mean_kappa = float(np.mean(kappa_all))
@@ -375,10 +402,10 @@ if __name__ == "__main__":
         max_img_cut[band_start:band_end, :] = 1.0
 
         T_cut, kappa_cut, cond_cut = evaluate_design_conductivity(
-            max_img_cut[None, ...], solver_res=128
+            max_img_cut[None, ...], solver_res=64
         )
 
-        print("Connectivity cut experiment:")
+        print("Connectivity cut experiment (solver_res=64):")
         print(
             f"Original max kappa_eff = {float(kappa_all[idx_max]):.6f}, "
             f"with middle cut = {float(kappa_cut[0]):.6f}"
@@ -391,6 +418,23 @@ if __name__ == "__main__":
             out_path=os.path.join(out_dir, "max_kappa_with_cut_T.png"),
             title_prefix=f"k_eff={float(kappa_cut[0]):.4f} | ",
         )
+
+        # Resolution sweep for max vs cut design to test connectivity robustness
+        resolutions = [16, 32, 64, 128, 256, 512]
+        print("\nResolution sweep (max vs cut):")
+        for res in resolutions:
+            t = time.time()
+            T_max_r, k_max_r, _ = evaluate_design_conductivity(
+                max_img[None, ...], solver_res=res
+            )
+            T_cut_r, k_cut_r, _ = evaluate_design_conductivity(
+                max_img_cut[None, ...], solver_res=res
+            )
+            t = time.time() - t
+            print(
+                f"  solver_res={res:3d}: k_max={float(k_max_r[0]):.6f}, "
+                f"k_cut={float(k_cut_r[0]):.6f}, delta={float(k_max_r[0]-k_cut_r[0]):.6f}, time={t:.3f}s"
+            )
 
 
 
